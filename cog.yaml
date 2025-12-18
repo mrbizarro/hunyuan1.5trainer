@@ -1,0 +1,38 @@
+build:
+  gpu: true
+  cuda: "12.4"
+  python_version: "3.11"
+  system_packages:
+    - "libgl1-mesa-glx"
+    - "libglib2.0-0"
+    - "ffmpeg"
+    - "git"
+  python_packages:
+    - "torch==2.5.1"
+    - "torchvision==0.20.1"
+    - "accelerate>=0.34.0"
+    - "transformers>=4.46.0"
+    - "diffusers>=0.32.0"
+    - "peft>=0.13.0"
+    - "safetensors>=0.4.0"
+    - "einops>=0.8.0"
+    - "sentencepiece>=0.2.0"
+    - "bitsandbytes>=0.44.0"
+    - "huggingface_hub>=0.26.0"
+    - "opencv-python>=4.10.0"
+    - "imageio>=2.36.0"
+    - "imageio-ffmpeg>=0.5.0"
+    - "pillow>=11.0.0"
+    - "numpy>=1.26.0"
+    - "tqdm>=4.66.0"
+    - "pyyaml>=6.0"
+    - "toml>=0.10.2"
+    - "timm>=1.0.0"
+    - "decord>=0.6.0"
+  run:
+    - "pip install flash-attn --no-build-isolation || true"
+    - "curl -o /usr/local/bin/pget -L 'https://github.com/replicate/pget/releases/download/v0.6.0/pget_linux_amd64' && chmod +x /usr/local/bin/pget"
+    - "git clone https://github.com/kohya-ss/musubi-tuner.git /src/musubi-tuner"
+    - "cd /src/musubi-tuner && pip install -r requirements.txt"
+
+train: "train.py:train"
