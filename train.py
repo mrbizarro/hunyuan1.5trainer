@@ -69,7 +69,7 @@ def caption_image(image_path, processor, model, trigger_word):
     
     image = Image.open(image_path).convert("RGB")
     
-    prompt = "<MORE_DETAILED_CAPTION>"
+    prompt = "&lt;MORE_DETAILED_CAPTION&gt;"
     inputs = processor(text=prompt, images=image, return_tensors="pt").to("cuda", torch.float16)
     
     generated_ids = model.generate(
@@ -80,7 +80,7 @@ def caption_image(image_path, processor, model, trigger_word):
     )
     
     caption = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-    caption = caption.replace("<MORE_DETAILED_CAPTION>", "").strip()
+    caption = caption.replace("&lt;MORE_DETAILED_CAPTION&gt;", "").strip()
     
     # Add trigger word
     return f"{trigger_word}, {caption}"
@@ -173,7 +173,7 @@ def train(
     resolution_width: int = Input(description="Training resolution width", default=544, ge=256, le=1280),
     resolution_height: int = Input(description="Training resolution height", default=960, ge=256, le=1280),
     use_fp8: bool = Input(description="Use FP8 quantization (saves VRAM)", default=True),
-    blocks_to_swap: int = Input(description="Blocks to swap to CPU (0-36, higher = less VRAM)", default=20, ge=0, le=36),
+    blocks_to_swap: int = Input(description="Blocks to swap to CPU (0-36, higher = less VRAM)", default=32, ge=0, le=36),
     gradient_checkpointing: bool = Input(description="Enable gradient checkpointing", default=True),
 ) -> TrainingOutput:
     """Train a HunyuanVideo 1.5 LoRA"""
