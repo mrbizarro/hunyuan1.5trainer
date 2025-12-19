@@ -12,6 +12,26 @@ from cog import BasePredictor, BaseModel, Input, Path as CogPath
 
 sys.path.insert(0, "/src/musubi-tuner")
 
+# Weight URLs from Comfy-Org (repackaged for easier download)
+WEIGHTS = {
+    "dit": {
+        "url": "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/diffusion_models/hunyuanvideo1.5_720p_t2v_fp16.safetensors",
+        "path": "/src/weights/hunyuanvideo1.5_720p_t2v_fp16.safetensors"
+    },
+    "vae": {
+        "url": "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/vae/hunyuanvideo15_vae_fp16.safetensors",
+        "path": "/src/weights/hunyuanvideo15_vae_fp16.safetensors"
+    },
+    "text_encoder1": {
+        "url": "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b.safetensors",
+        "path": "/src/weights/text_encoder/qwen_2.5_vl_7b.safetensors"
+    },
+    "text_encoder2": {
+        "url": "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/text_encoders/byt5_small_glyphxl_fp16.safetensors",
+        "path": "/src/weights/text_encoder_2/byt5_small_glyphxl_fp16.safetensors"
+    }
+}
+
 class TrainingOutput(BaseModel):
     weights: CogPath
 
@@ -24,6 +44,36 @@ class Predictor(BasePredictor):
         info: str = Input(description="This is a TRAINING model. Click the Train tab!", default="Click Train tab")
     ) -> str:
         return "Training-only model. Use the Train tab to fine-tune HunyuanVideo 1.5."
+
+def download_weights():
+    """Download model weights if not present."""
+    print("Checking/downloading model weights...")
+    
+    for name, info in WEIGHTS.items():
+        path = Path(info["path"])
+        if path.exists():
+            print(f"  {name}: already exists")
+            continue
+        
+        path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"  {name}: downloading...")
+        
+        # Try aria2c first (faster), fall back to wget
+        try:
+            subprocess.run([
+                "aria2c", "-x", "16", "-s", "16", "-k", "1M",
+                "-o", path.name,
+                "-d", str(path.parent),
+                info["url"]
+            ], check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            subprocess.run([
+                "wget", "-q", "--show-progress",
+                "-O", str(path),
+                info["url"]
+            ], check=True)
+        
+        print(f"  {name}: done ({path.stat().st_size / 1e9:.1f} GB)")
 
 def setup_florence2():
     from transformers import AutoProcessor, AutoModelForCausalLM
@@ -98,11 +148,9 @@ enable_bucket = true
 def find_script(musubi_dir, script_names):
     """Find a script in musubi-tuner directory, checking multiple possible locations."""
     for name in script_names:
-        # Check root
         path = musubi_dir / name
         if path.exists():
             return path
-        # Check src/musubi_tuner
         path = musubi_dir / "src" / "musubi_tuner" / name
         if path.exists():
             return path
@@ -119,15 +167,21 @@ def train(
     blocks_to_swap: int = Input(description="CPU offload blocks (more=less VRAM)", default=32, ge=0, le=40),
 ) -> TrainingOutput:
     
-    # Paths for HunyuanVideo 1.5
-    WEIGHTS_DIR = Path("/src/weights")
-    DIT_PATH = WEIGHTS_DIR / "hunyuanvideo1.5_720p_t2v_fp16.safetensors"
-    VAE_PATH = WEIGHTS_DIR / "hunyuanvideo15_vae_fp16.safetensors"
-    TEXT_ENCODER1_PATH = WEIGHTS_DIR / "text_encoder" / "qwen_2.5_vl_7b.safetensors"
-    TEXT_ENCODER2_PATH = WEIGHTS_DIR / "text_encoder_2" / "byt5_small_glyphxl_fp16.safetensors"
+    print("=== HunyuanVideo 1.5 LoRA Training ===")
+    print(f"Resolution: {resolution_width}x{resolution_height}")
+    print(f"Steps: {train_steps}, LR: {learning_rate}, Rank: {lora_rank}")
+    
+    # Download weights first
+    print("\n[0/5] Downloading model weights...")
+    download_weights()
+    
+    # Paths
+    DIT_PATH = Path(WEIGHTS["dit"]["path"])
+    VAE_PATH = Path(WEIGHTS["vae"]["path"])
+    TEXT_ENCODER1_PATH = Path(WEIGHTS["text_encoder1"]["path"])
+    TEXT_ENCODER2_PATH = Path(WEIGHTS["text_encoder2"]["path"])
     MUSUBI_DIR = Path("/src/musubi-tuner")
     
-    # Setup directories
     data_dir = Path("/src/training_data")
     output_dir = Path("/src/output")
     cache_dir = data_dir / "cache"
@@ -135,66 +189,49 @@ def train(
     for d in [data_dir, output_dir, cache_dir]:
         d.mkdir(parents=True, exist_ok=True)
     
-    print("=== HunyuanVideo 1.5 LoRA Training ===")
-    print(f"Resolution: {resolution_width}x{resolution_height}")
-    print(f"Steps: {train_steps}, LR: {learning_rate}, Rank: {lora_rank}")
-    
-    # List musubi-tuner scripts to understand available options
-    print("\n[0/4] Checking musubi-tuner scripts...")
+    # List musubi-tuner scripts
+    print("\n[1/5] Checking musubi-tuner scripts...")
     subprocess.run(["ls", "-la", str(MUSUBI_DIR)], check=False)
-    subprocess.run(["ls", "-la", str(MUSUBI_DIR / "src" / "musubi_tuner")], check=False)
     
-    # Find scripts - try HunyuanVideo 1.5 specific scripts first, fall back to 1.0 scripts
+    # Find scripts
     cache_latent_script = find_script(MUSUBI_DIR, [
-        "hv15_cache_latents.py",
-        "hunyuan15_cache_latents.py", 
-        "hv_1_5_cache_latents.py",
-        "cache_latents.py"  # fallback to standard
+        "hv15_cache_latents.py", "hunyuan15_cache_latents.py", 
+        "hv_1_5_cache_latents.py", "cache_latents.py"
     ])
-    
     cache_te_script = find_script(MUSUBI_DIR, [
-        "hv15_cache_text_encoder_outputs.py",
-        "hunyuan15_cache_text_encoder_outputs.py",
-        "hv_1_5_cache_text_encoder_outputs.py", 
-        "cache_text_encoder_outputs.py"  # fallback to standard
+        "hv15_cache_text_encoder_outputs.py", "hunyuan15_cache_text_encoder_outputs.py",
+        "hv_1_5_cache_text_encoder_outputs.py", "cache_text_encoder_outputs.py"
     ])
-    
     train_script = find_script(MUSUBI_DIR, [
-        "hv15_train_network.py",
-        "hunyuan15_train_network.py",
-        "hv_1_5_train_network.py",
-        "hv_train_network.py"  # fallback to standard
+        "hv15_train_network.py", "hunyuan15_train_network.py",
+        "hv_1_5_train_network.py", "hv_train_network.py"
     ])
     
-    print(f"Cache latent script: {cache_latent_script}")
-    print(f"Cache TE script: {cache_te_script}")
-    print(f"Train script: {train_script}")
+    print(f"Scripts found: latent={cache_latent_script}, te={cache_te_script}, train={train_script}")
     
     if not all([cache_latent_script, cache_te_script, train_script]):
-        raise RuntimeError(f"Could not find required musubi-tuner scripts!")
+        raise RuntimeError("Missing musubi-tuner scripts!")
     
     # Extract and caption
-    print("\n[1/4] Extracting and captioning data...")
+    print("\n[2/5] Extracting and captioning data...")
     data_dir, media_files = extract_and_caption(str(input_videos), data_dir, trigger_word)
     print(f"Found {len(media_files)} media files")
     
-    # Create dataset config
     dataset_config = data_dir / "dataset.toml"
     create_dataset_config(str(data_dir), str(dataset_config), resolution_width, resolution_height)
     
     # Cache latents
-    print("\n[2/4] Caching latents (HunyuanVideo 1.5)...")
-    cache_latent_cmd = [
+    print("\n[3/5] Caching latents...")
+    subprocess.run([
         "python", str(cache_latent_script),
         "--dataset_config", str(dataset_config),
         "--vae", str(VAE_PATH),
         "--vae_chunk_size", "32",
         "--vae_tiling",
-    ]
-    subprocess.run(cache_latent_cmd, check=True)
+    ], check=True)
     
     # Cache text encoder outputs
-    print("\n[3/4] Caching text encoder outputs (Qwen2.5-VL + ByT5)...")
+    print("\n[4/5] Caching text encoder outputs...")
     cache_te_cmd = [
         "python", str(cache_te_script),
         "--dataset_config", str(dataset_config),
@@ -202,13 +239,12 @@ def train(
         "--text_encoder2", str(TEXT_ENCODER2_PATH),
         "--batch_size", "4",
     ]
-    # Add fp8_llm flag if the text encoder supports it
     if "hv15" in str(cache_te_script) or "hunyuan15" in str(cache_te_script):
         cache_te_cmd.append("--fp8_llm")
     subprocess.run(cache_te_cmd, check=True)
     
     # Train
-    print("\n[4/4] Training HunyuanVideo 1.5 LoRA...")
+    print("\n[5/5] Training LoRA...")
     train_cmd = [
         "accelerate", "launch",
         "--num_cpu_threads_per_process", "1",
