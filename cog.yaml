@@ -36,6 +36,7 @@ build:
   run:
     - "pip install flash-attn --no-build-isolation || true"
     - "git clone https://github.com/kohya-ss/musubi-tuner.git /src/musubi-tuner"
+    - "pip install -e /src/musubi-tuner"
     - "mkdir -p /src/weights"
 
 predict: "train.py:Predictor"
