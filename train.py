@@ -226,8 +226,6 @@ def train(
         "python", str(cache_latent_script),
         "--dataset_config", str(dataset_config),
         "--vae", str(VAE_PATH),
-        "--vae_chunk_size", "32",
-        "--vae_tiling",
     ], check=True)
     
     # Cache text encoder outputs
