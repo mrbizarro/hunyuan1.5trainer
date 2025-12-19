@@ -157,7 +157,7 @@ def find_script(musubi_dir, script_names):
     return None
 
 def train(
-    input_videos: CogPath = Input(description="ZIP file with videos/images + optional .txt captions"),
+    input_data: CogPath = Input(description="ZIP file with videos/images + optional .txt captions"),
     trigger_word: str = Input(description="Trigger word for LoRA", default="TOK"),
     train_steps: int = Input(description="Training steps", default=1000, ge=100, le=5000),
     learning_rate: float = Input(description="Learning rate", default=2e-4),
@@ -214,7 +214,7 @@ def train(
     
     # Extract and caption
     print("\n[2/5] Extracting and captioning data...")
-    data_dir, media_files = extract_and_caption(str(input_videos), data_dir, trigger_word)
+    data_dir, media_files = extract_and_caption(str(input_data), data_dir, trigger_word)
     print(f"Found {len(media_files)} media files")
     
     dataset_config = data_dir / "dataset.toml"
