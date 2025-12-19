@@ -1,7 +1,7 @@
 build:
   gpu: true
   cuda: "12.4"
-  python_version: "3.11"
+  python_version: "3.10"
   system_packages:
     - "libgl1-mesa-glx"
     - "libglib2.0-0"
@@ -29,10 +29,18 @@ build:
     - "toml>=0.10.2"
     - "timm>=1.0.0"
     - "decord>=0.6.0"
+    - "av"
+    - "qwen-vl-utils"
   run:
     - "pip install flash-attn --no-build-isolation || true"
     - "curl -o /usr/local/bin/pget -L 'https://github.com/replicate/pget/releases/download/v0.6.0/pget_linux_amd64' && chmod +x /usr/local/bin/pget"
     - "git clone https://github.com/kohya-ss/musubi-tuner.git /src/musubi-tuner"
-    - "cd /src/musubi-tuner && pip install -r requirements.txt"
+    - "mkdir -p /src/weights/text_encoder /src/weights/text_encoder_2"
+    # HunyuanVideo 1.5 models from Comfy-Org
+    - "pget https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b.safetensors /src/weights/text_encoder/qwen_2.5_vl_7b.safetensors"
+    - "pget https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/text_encoders/byt5_small_glyphxl_fp16.safetensors /src/weights/text_encoder_2/byt5_small_glyphxl_fp16.safetensors"
+    - "pget https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/diffusion_models/hunyuanvideo1.5_720p_t2v_fp16.safetensors /src/weights/hunyuanvideo1.5_720p_t2v_fp16.safetensors"
+    - "pget https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/vae/hunyuanvideo15_vae_fp16.safetensors /src/weights/hunyuanvideo15_vae_fp16.safetensors"
 
+predict: "train.py:Predictor"
 train: "train.py:train"
