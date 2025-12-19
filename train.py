@@ -283,3 +283,4 @@ def train(
     print(f"Output: {final_lora}")
     
     return TrainingOutput(weights=CogPath(final_lora))
+# Force rebuild Fri Dec 19 12:29:03 IST 2025
