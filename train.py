@@ -1,288 +1,373 @@
 """
-HunyuanVideo 1.5 LoRA Trainer for Replicate (A100 80GB)
-Uses musubi-tuner for HunyuanVideo 1.5 training with Qwen2.5-VL + ByT5 text encoders
+HunyuanVideo 1.5 LoRA Training for Replicate
+Based on kohya-ss/musubi-tuner
 """
-
 import os
-import sys
+import shutil
 import subprocess
 import zipfile
+import tarfile
+import tempfile
+import random
 from pathlib import Path
-from cog import BasePredictor, BaseModel, Input, Path as CogPath
+from typing import Optional
+from cog import BaseModel, Input, Path as CogPath
 
-sys.path.insert(0, "/src/musubi-tuner")
+# Paths
+MODEL_CACHE = "/src/models"
+INPUT_DIR = "/src/input"
+OUTPUT_DIR = "/src/output"
+MUSUBI_DIR = "/src/musubi-tuner"
 
-# Weight URLs from Comfy-Org (repackaged for easier download)
-WEIGHTS = {
-    "dit": {
-        "url": "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/diffusion_models/hunyuanvideo1.5_720p_t2v_fp16.safetensors",
-        "path": "/src/weights/hunyuanvideo1.5_720p_t2v_fp16.safetensors"
-    },
-    "vae": {
-        "url": "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/vae/hunyuanvideo15_vae_fp16.safetensors",
-        "path": "/src/weights/hunyuanvideo15_vae_fp16.safetensors"
-    },
-    "text_encoder1": {
-        "url": "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b.safetensors",
-        "path": "/src/weights/text_encoder/qwen_2.5_vl_7b.safetensors"
-    },
-    "text_encoder2": {
-        "url": "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/text_encoders/byt5_small_glyphxl_fp16.safetensors",
-        "path": "/src/weights/text_encoder_2/byt5_small_glyphxl_fp16.safetensors"
-    }
+# Model URLs from HuggingFace/ComfyUI
+MODEL_FILES = {
+    "dit_t2v": "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/diffusion_models/hunyuanvideo1.5_720p_t2v_fp16.safetensors",
+    "dit_i2v": "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/diffusion_models/hunyuanvideo1.5_720p_i2v_fp16.safetensors", 
+    "vae": "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/vae/hunyuanvideo15_vae_fp16.safetensors",
+    "text_encoder": "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b.safetensors",
+    "byt5": "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/text_encoders/byt5_small_glyphxl_fp16.safetensors",
+    "image_encoder": "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/clip_vision/sigclip_vision_patch14_384.safetensors",
 }
 
 class TrainingOutput(BaseModel):
     weights: CogPath
 
-class Predictor(BasePredictor):
-    def setup(self):
-        pass
-    
-    def predict(
-        self,
-        info: str = Input(description="This is a TRAINING model. Click the Train tab!", default="Click Train tab")
-    ) -> str:
-        return "Training-only model. Use the Train tab to fine-tune HunyuanVideo 1.5."
 
 def download_weights():
-    """Download model weights if not present."""
-    print("Checking/downloading model weights...")
+    """Download model weights if not cached"""
+    print("\n=== 📥 Downloading Model Weights ===")
+    os.makedirs(MODEL_CACHE, exist_ok=True)
     
-    for name, info in WEIGHTS.items():
-        path = Path(info["path"])
-        if path.exists():
-            print(f"  {name}: already exists")
+    for name, url in MODEL_FILES.items():
+        filename = url.split("/")[-1]
+        filepath = os.path.join(MODEL_CACHE, filename)
+        
+        if os.path.exists(filepath):
+            print(f"✓ {name}: Already cached")
             continue
-        
-        path.parent.mkdir(parents=True, exist_ok=True)
-        print(f"  {name}: downloading...")
-        
-        # Try aria2c first (faster), fall back to wget
-        try:
-            subprocess.run([
-                "aria2c", "-x", "16", "-s", "16", "-k", "1M",
-                "-o", path.name,
-                "-d", str(path.parent),
-                info["url"]
-            ], check=True)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            subprocess.run([
-                "wget", "-q", "--show-progress",
-                "-O", str(path),
-                info["url"]
-            ], check=True)
-        
-        print(f"  {name}: done ({path.stat().st_size / 1e9:.1f} GB)")
-
-def setup_florence2():
-    from transformers import AutoProcessor, AutoModelForCausalLM
-    import torch
-    processor = AutoProcessor.from_pretrained("microsoft/Florence-2-large", trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained("microsoft/Florence-2-large", torch_dtype=torch.float16, trust_remote_code=True).cuda()
-    return processor, model
-
-def caption_image(image_path, processor, model, trigger_word):
-    from PIL import Image
-    import torch
-    image = Image.open(image_path).convert("RGB")
-    inputs = processor(text="<MORE_DETAILED_CAPTION>", images=image, return_tensors="pt").to("cuda", torch.float16)
-    generated_ids = model.generate(input_ids=inputs["input_ids"], pixel_values=inputs["pixel_values"], max_new_tokens=256, num_beams=3)
-    caption = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].replace("<MORE_DETAILED_CAPTION>", "").strip()
-    return f"{trigger_word}, {caption}"
-
-def extract_and_caption(zip_path, output_dir, trigger_word):
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(zip_path, 'r') as zf:
-        zf.extractall(output_dir)
+            
+        print(f"⬇️ Downloading {name}...")
+        subprocess.run([
+            "wget", "-q", "--show-progress", "-O", filepath, url
+        ], check=True)
+        print(f"✓ {name}: Downloaded")
     
-    image_exts = {'.jpg', '.jpeg', '.png', '.webp'}
-    video_exts = {'.mp4', '.mov', '.webm'}
-    media_files = [f for f in output_dir.rglob("*") if f.suffix.lower() in image_exts | video_exts]
-    
-    needs_caption = [m for m in media_files if not m.with_suffix('.txt').exists()]
-    
-    if needs_caption:
-        print(f"Auto-captioning {len(needs_caption)} files with Florence-2...")
-        processor, model = setup_florence2()
-        for media in needs_caption:
-            if media.suffix.lower() in image_exts:
-                caption = caption_image(media, processor, model, trigger_word)
-            else:
-                import cv2
-                cap = cv2.VideoCapture(str(media))
-                ret, frame = cap.read()
-                cap.release()
-                if ret:
-                    temp_img = output_dir / "temp.jpg"
-                    cv2.imwrite(str(temp_img), frame)
-                    caption = caption_image(temp_img, processor, model, trigger_word)
-                    temp_img.unlink()
-                else:
-                    caption = f"{trigger_word}, a video"
-            media.with_suffix('.txt').write_text(caption)
-            print(f"  {media.name}: {caption[:60]}...")
-        del processor, model
-        import torch; torch.cuda.empty_cache()
-    else:
-        print("All files have .txt captions - using your captions")
-    return output_dir, media_files
+    print("✅ All weights ready")
+    print("=====================================")
 
-def create_dataset_config(data_dir, output_path, w, h):
-    """Create dataset config for HunyuanVideo 1.5 training.
+
+def extract_zip(zip_path: str, extract_to: str):
+    """Extract training data ZIP"""
+    print("\n=== 📂 Extracting Training Data ===")
+    os.makedirs(extract_to, exist_ok=True)
     
-    Uses the standard musubi-tuner format - no nested subsets.
-    Supports both images (target_frames=[1]) and videos (target_frames=[1,25,49]).
-    """
-    Path(output_path).write_text(f'''[general]
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_to)
+    
+    # Count files
+    video_count = len([f for f in os.listdir(extract_to) if f.endswith(('.mp4', '.mov', '.avi', '.webm'))])
+    image_count = len([f for f in os.listdir(extract_to) if f.endswith(('.jpg', '.jpeg', '.png', '.webp'))])
+    caption_count = len([f for f in os.listdir(extract_to) if f.endswith('.txt')])
+    
+    print(f"📹 Videos: {video_count}")
+    print(f"🖼️ Images: {image_count}")
+    print(f"📝 Captions: {caption_count}")
+    print("✅ Extraction complete")
+    print("=====================================")
+    
+    return video_count > 0  # Returns True if video dataset
+
+
+def create_dataset_toml(is_video: bool, resolution: tuple = (960, 544)):
+    """Create dataset configuration TOML"""
+    print("\n=== 📝 Creating Dataset Config ===")
+    
+    config = f"""[general]
+resolution = [{resolution[0]}, {resolution[1]}]
 caption_extension = ".txt"
-
-[[datasets]]
-image_directory = "{data_dir}"
-video_directory = "{data_dir}"
-cache_directory = "{data_dir}/cache"
-resolution = [{w}, {h}]
 batch_size = 1
 enable_bucket = true
-target_frames = [1, 25, 49]
-''')
+bucket_no_upscale = false
 
-def find_script(musubi_dir, script_names):
-    """Find a script in musubi-tuner directory, checking multiple possible locations."""
-    for name in script_names:
-        path = musubi_dir / name
-        if path.exists():
-            return path
-        path = musubi_dir / "src" / "musubi_tuner" / name
-        if path.exists():
-            return path
-    return None
+[[datasets]]
+{"video_directory" if is_video else "image_directory"} = "{INPUT_DIR}/videos"
+cache_directory = "{INPUT_DIR}/cache"
+"""
+    
+    if is_video:
+        config += """target_frames = [1, 13, 25]
+frame_extraction = "head"
+"""
+    
+    toml_path = "/src/train.toml"
+    with open(toml_path, "w") as f:
+        f.write(config)
+    
+    print(f"Config saved to {toml_path}")
+    print("=====================================")
+    return toml_path
 
-def train(
-    input_data: CogPath = Input(description="ZIP file with videos/images + optional .txt captions"),
-    trigger_word: str = Input(description="Trigger word for LoRA", default="TOK"),
-    train_steps: int = Input(description="Training steps", default=1000, ge=100, le=5000),
-    learning_rate: float = Input(description="Learning rate", default=2e-4),
-    lora_rank: int = Input(description="LoRA rank", default=32, ge=8, le=128),
-    resolution_width: int = Input(description="Video width", default=544, ge=256, le=1280),
-    resolution_height: int = Input(description="Video height", default=960, ge=256, le=1280),
-    blocks_to_swap: int = Input(description="CPU offload blocks (more=less VRAM)", default=32, ge=0, le=40),
-) -> TrainingOutput:
+
+def cache_latents(task: str):
+    """Cache VAE latents"""
+    print("\n=== 💾 Caching Latents ===")
     
-    print("=== HunyuanVideo 1.5 LoRA Training ===")
-    print(f"Resolution: {resolution_width}x{resolution_height}")
-    print(f"Steps: {train_steps}, LR: {learning_rate}, Rank: {lora_rank}")
+    vae_path = os.path.join(MODEL_CACHE, "hunyuanvideo15_vae_fp16.safetensors")
     
-    # Download weights first
-    print("\n[0/5] Downloading model weights...")
-    download_weights()
-    
-    # Paths
-    DIT_PATH = Path(WEIGHTS["dit"]["path"])
-    VAE_PATH = Path(WEIGHTS["vae"]["path"])
-    TEXT_ENCODER1_PATH = Path(WEIGHTS["text_encoder1"]["path"])
-    TEXT_ENCODER2_PATH = Path(WEIGHTS["text_encoder2"]["path"])
-    MUSUBI_DIR = Path("/src/musubi-tuner")
-    
-    data_dir = Path("/src/training_data")
-    output_dir = Path("/src/output")
-    cache_dir = data_dir / "cache"
-    
-    for d in [data_dir, output_dir, cache_dir]:
-        d.mkdir(parents=True, exist_ok=True)
-    
-    # List musubi-tuner scripts
-    print("\n[1/5] Checking musubi-tuner scripts...")
-    subprocess.run(["ls", "-la", str(MUSUBI_DIR)], check=False)
-    
-    # Find scripts
-    cache_latent_script = find_script(MUSUBI_DIR, [
-        "hv15_cache_latents.py", "hunyuan15_cache_latents.py", 
-        "hv_1_5_cache_latents.py", "cache_latents.py"
-    ])
-    cache_te_script = find_script(MUSUBI_DIR, [
-        "hv15_cache_text_encoder_outputs.py", "hunyuan15_cache_text_encoder_outputs.py",
-        "hv_1_5_cache_text_encoder_outputs.py", "cache_text_encoder_outputs.py"
-    ])
-    train_script = find_script(MUSUBI_DIR, [
-        "hv15_train_network.py", "hunyuan15_train_network.py",
-        "hv_1_5_train_network.py", "hv_train_network.py"
-    ])
-    
-    print(f"Scripts found: latent={cache_latent_script}, te={cache_te_script}, train={train_script}")
-    
-    if not all([cache_latent_script, cache_te_script, train_script]):
-        raise RuntimeError("Missing musubi-tuner scripts!")
-    
-    # Extract and caption
-    print("\n[2/5] Extracting and captioning data...")
-    data_dir, media_files = extract_and_caption(str(input_data), data_dir, trigger_word)
-    print(f"Found {len(media_files)} media files")
-    
-    dataset_config = data_dir / "dataset.toml"
-    create_dataset_config(str(data_dir), str(dataset_config), resolution_width, resolution_height)
-    
-    # Cache latents
-    print("\n[3/5] Caching latents...")
-    subprocess.run([
-        "python", str(cache_latent_script),
-        "--dataset_config", str(dataset_config),
-        "--vae", str(VAE_PATH),
-    ], check=True)
-    
-    # Cache text encoder outputs
-    print("\n[4/5] Caching text encoder outputs...")
-    cache_te_cmd = [
-        "python", str(cache_te_script),
-        "--dataset_config", str(dataset_config),
-        "--text_encoder1", str(TEXT_ENCODER1_PATH),
-        "--text_encoder2", str(TEXT_ENCODER2_PATH),
-        "--batch_size", "4",
+    cmd = [
+        "python", f"{MUSUBI_DIR}/hv_1_5_cache_latents.py",
+        "--dataset_config", "/src/train.toml",
+        "--vae", vae_path,
+        "--vae_sample_size", "128",
     ]
-    if "hv15" in str(cache_te_script) or "hunyuan15" in str(cache_te_script):
-        cache_te_cmd.append("--fp8_llm")
-    subprocess.run(cache_te_cmd, check=True)
     
-    # Train
-    print("\n[5/5] Training LoRA...")
-    train_cmd = [
+    # For I2V, add image encoder
+    if task == "i2v":
+        image_encoder_path = os.path.join(MODEL_CACHE, "sigclip_vision_patch14_384.safetensors")
+        cmd.extend(["--i2v", "--image_encoder", image_encoder_path])
+    
+    subprocess.run(cmd, check=True, cwd=MUSUBI_DIR)
+    print("✅ Latents cached")
+    print("=====================================")
+
+
+def cache_text_encoder_outputs():
+    """Cache text encoder outputs"""
+    print("\n=== 💭 Caching Text Encodings ===")
+    
+    text_encoder_path = os.path.join(MODEL_CACHE, "qwen_2.5_vl_7b.safetensors")
+    byt5_path = os.path.join(MODEL_CACHE, "byt5_small_glyphxl_fp16.safetensors")
+    
+    cmd = [
+        "python", f"{MUSUBI_DIR}/hv_1_5_cache_text_encoder_outputs.py",
+        "--dataset_config", "/src/train.toml",
+        "--text_encoder", text_encoder_path,
+        "--byt5", byt5_path,
+        "--batch_size", "4",
+        "--fp8_vl",  # Use FP8 to save VRAM
+    ]
+    
+    subprocess.run(cmd, check=True, cwd=MUSUBI_DIR)
+    print("✅ Text encodings cached")
+    print("=====================================")
+
+
+def run_training(
+    task: str,
+    epochs: int,
+    max_train_steps: int,
+    rank: int,
+    learning_rate: float,
+    optimizer: str,
+    seed: int,
+):
+    """Run LoRA training"""
+    print("\n=== 🚀 Starting Training ===")
+    
+    # Select DiT based on task
+    if task == "t2v":
+        dit_path = os.path.join(MODEL_CACHE, "hunyuanvideo1.5_720p_t2v_fp16.safetensors")
+    else:
+        dit_path = os.path.join(MODEL_CACHE, "hunyuanvideo1.5_720p_i2v_fp16.safetensors")
+    
+    vae_path = os.path.join(MODEL_CACHE, "hunyuanvideo15_vae_fp16.safetensors")
+    text_encoder_path = os.path.join(MODEL_CACHE, "qwen_2.5_vl_7b.safetensors")
+    byt5_path = os.path.join(MODEL_CACHE, "byt5_small_glyphxl_fp16.safetensors")
+    
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    cmd = [
         "accelerate", "launch",
-        "--num_cpu_threads_per_process", "1",
+        "--num_cpu_threads_per_process", "8",
         "--mixed_precision", "bf16",
-        str(train_script),
-        "--dit", str(DIT_PATH),
-        "--dataset_config", str(dataset_config),
+        f"{MUSUBI_DIR}/hv_1_5_train_network.py",
+        "--dit", dit_path,
+        "--vae", vae_path,
+        "--text_encoder", text_encoder_path,
+        "--byt5", byt5_path,
+        "--dataset_config", "/src/train.toml",
+        "--task", task,
         "--sdpa",
         "--mixed_precision", "bf16",
-        "--fp8_base",
-        "--optimizer_type", "adamw8bit",
+        "--fp8_base", "--fp8_scaled",  # Memory optimization
+        "--fp8_vl",  # FP8 for text encoder
+        "--optimizer_type", optimizer,
         "--learning_rate", str(learning_rate),
         "--gradient_checkpointing",
-        "--max_data_loader_n_workers", "2",
+        "--max_data_loader_n_workers", "4",
         "--persistent_data_loader_workers",
-        "--network_module", "networks.lora",
-        "--network_dim", str(lora_rank),
+        "--network_module", "networks.lora_hv_1_5",
+        "--network_dim", str(rank),
         "--timestep_sampling", "shift",
-        "--discrete_flow_shift", "7.0",
-        "--max_train_steps", str(train_steps),
-        "--save_every_n_steps", str(max(train_steps // 4, 100)),
-        "--seed", "42",
-        "--output_dir", str(output_dir),
-        "--output_name", "hunyuan15_lora",
-        "--blocks_to_swap", str(blocks_to_swap),
+        "--discrete_flow_shift", "2.0",
+        "--seed", str(seed),
+        "--output_dir", OUTPUT_DIR,
+        "--output_name", "lora",
     ]
-    subprocess.run(train_cmd, check=True)
     
-    # Find output
-    lora_files = list(output_dir.glob("*.safetensors"))
-    if not lora_files:
-        raise RuntimeError("No LoRA file generated!")
+    # Add image encoder for I2V
+    if task == "i2v":
+        image_encoder_path = os.path.join(MODEL_CACHE, "sigclip_vision_patch14_384.safetensors")
+        cmd.extend(["--image_encoder", image_encoder_path])
     
-    final_lora = sorted(lora_files, key=lambda x: x.stat().st_mtime)[-1]
-    print(f"\n=== Training Complete ===")
-    print(f"Output: {final_lora}")
+    # Epochs or steps
+    if max_train_steps > 0:
+        cmd.extend(["--max_train_steps", str(max_train_steps)])
+    else:
+        cmd.extend(["--max_train_epochs", str(epochs)])
     
-    return TrainingOutput(weights=CogPath(final_lora))
-# Force rebuild Fri Dec 19 12:29:03 IST 2025
-# Cache buster: 1766307959
+    subprocess.run(cmd, check=True, cwd=MUSUBI_DIR)
+    print("\n✨ Training Complete!")
+    print("=====================================")
+
+
+def convert_lora_to_comfyui():
+    """Convert LoRA to ComfyUI format"""
+    print("\n=== 🔄 Converting LoRA Format ===")
+    
+    input_lora = os.path.join(OUTPUT_DIR, "lora.safetensors")
+    output_lora = os.path.join(OUTPUT_DIR, "lora_comfyui.safetensors")
+    
+    cmd = [
+        "python", 
+        f"{MUSUBI_DIR}/src/musubi_tuner/networks/convert_hunyuan_video_1_5_lora_to_comfy.py",
+        input_lora,
+        output_lora,
+    ]
+    
+    subprocess.run(cmd, check=True, cwd=MUSUBI_DIR)
+    print("✅ LoRA converted to ComfyUI format")
+    print("=====================================")
+
+
+def archive_results() -> str:
+    """Create output archive"""
+    print("\n=== 📦 Archiving Results ===")
+    
+    archive_path = "/src/trained_lora.tar"
+    
+    with tarfile.open(archive_path, "w") as tar:
+        # Add the original LoRA
+        lora_path = os.path.join(OUTPUT_DIR, "lora.safetensors")
+        if os.path.exists(lora_path):
+            tar.add(lora_path, arcname="lora.safetensors")
+        
+        # Add ComfyUI format
+        comfy_path = os.path.join(OUTPUT_DIR, "lora_comfyui.safetensors")
+        if os.path.exists(comfy_path):
+            tar.add(comfy_path, arcname="lora_comfyui.safetensors")
+    
+    print(f"✅ Archive created: {archive_path}")
+    print("=====================================")
+    return archive_path
+
+
+def train(
+    input_videos: CogPath = Input(
+        description="ZIP file containing training videos/images with captions (.txt files with same name)"
+    ),
+    task: str = Input(
+        description="Training task: t2v (text-to-video) or i2v (image-to-video)",
+        default="t2v",
+        choices=["t2v", "i2v"],
+    ),
+    trigger_word: str = Input(
+        description="Trigger word for the LoRA (will be prepended to captions)",
+        default="",
+    ),
+    epochs: int = Input(
+        description="Number of training epochs",
+        default=10,
+        ge=1,
+        le=100,
+    ),
+    max_train_steps: int = Input(
+        description="Max training steps (overrides epochs if > 0)",
+        default=-1,
+        ge=-1,
+        le=10000,
+    ),
+    rank: int = Input(
+        description="LoRA rank (dimension)",
+        default=32,
+        ge=4,
+        le=128,
+    ),
+    learning_rate: float = Input(
+        description="Learning rate",
+        default=1e-4,
+        ge=1e-6,
+        le=1e-3,
+    ),
+    optimizer: str = Input(
+        description="Optimizer type",
+        default="adamw8bit",
+        choices=["adamw8bit", "adamw", "AdaFactor"],
+    ),
+    seed: int = Input(
+        description="Random seed (-1 for random)",
+        default=42,
+        ge=-1,
+    ),
+) -> TrainingOutput:
+    """Train HunyuanVideo 1.5 LoRA"""
+    
+    print("=" * 50)
+    print("🎬 HunyuanVideo 1.5 LoRA Training")
+    print("=" * 50)
+    
+    # Handle seed
+    if seed < 0:
+        seed = random.randint(0, 2**16)
+    print(f"Using seed: {seed}")
+    
+    # Setup directories
+    os.makedirs(INPUT_DIR, exist_ok=True)
+    os.makedirs(os.path.join(INPUT_DIR, "videos"), exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    # Download weights
+    download_weights()
+    
+    # Extract training data
+    is_video = extract_zip(str(input_videos), os.path.join(INPUT_DIR, "videos"))
+    
+    # Add trigger word to captions if specified
+    if trigger_word:
+        print(f"\n=== Adding trigger word: {trigger_word} ===")
+        video_dir = os.path.join(INPUT_DIR, "videos")
+        for txt_file in Path(video_dir).glob("*.txt"):
+            content = txt_file.read_text()
+            txt_file.write_text(f"{trigger_word}, {content}")
+    
+    # Create dataset config
+    create_dataset_toml(is_video)
+    
+    # Cache latents
+    cache_latents(task)
+    
+    # Cache text encoder outputs
+    cache_text_encoder_outputs()
+    
+    # Run training
+    run_training(
+        task=task,
+        epochs=epochs,
+        max_train_steps=max_train_steps,
+        rank=rank,
+        learning_rate=learning_rate,
+        optimizer=optimizer,
+        seed=seed,
+    )
+    
+    # Convert to ComfyUI format
+    convert_lora_to_comfyui()
+    
+    # Archive results
+    output_path = archive_results()
+    
+    print("\n" + "=" * 50)
+    print("✅ Training Complete!")
+    print("=" * 50)
+    
+    return TrainingOutput(weights=CogPath(output_path))
