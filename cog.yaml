@@ -42,3 +42,4 @@ build:
     - "mkdir -p /src/models"
 
 train: "train.py:train"
+predict: "predict.py:Predictor"
