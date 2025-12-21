@@ -36,6 +36,7 @@ build:
   run:
     # Clone musubi-tuner (latest with 1.5 support)
     - "git clone https://github.com/kohya-ss/musubi-tuner.git /src/musubi-tuner"
+    - "rm -f /src/musubi-tuner/.python-version"
     - "cd /src/musubi-tuner && pip install -e ."
     # Create model cache directory
     - "mkdir -p /src/models"
