@@ -130,18 +130,22 @@ def extract_and_caption(zip_path, output_dir, trigger_word):
     return output_dir, media_files
 
 def create_dataset_config(data_dir, output_path, w, h):
+    """Create dataset config for HunyuanVideo 1.5 training.
+    
+    Uses the standard musubi-tuner format - no nested subsets.
+    Supports both images (target_frames=[1]) and videos (target_frames=[1,25,49]).
+    """
     Path(output_path).write_text(f'''[general]
 caption_extension = ".txt"
 
 [[datasets]]
-batch_size = 1
+image_directory = "{data_dir}"
+video_directory = "{data_dir}"
+cache_directory = "{data_dir}/cache"
 resolution = [{w}, {h}]
+batch_size = 1
 enable_bucket = true
-
-  [[datasets.subsets]]
-  image_directory = "{data_dir}"
-  cache_directory = "{data_dir}/cache"
-  target_frames = [1, 25, 49]
+target_frames = [1, 25, 49]
 ''')
 
 def find_script(musubi_dir, script_names):
@@ -281,4 +285,4 @@ def train(
     
     return TrainingOutput(weights=CogPath(final_lora))
 # Force rebuild Fri Dec 19 12:29:03 IST 2025
-# Cache buster: 1766305526
+# Cache buster: 1766307959
