@@ -131,7 +131,6 @@ def extract_and_caption(zip_path, output_dir, trigger_word):
 
 def create_dataset_config(data_dir, output_path, w, h):
     Path(output_path).write_text(f'''[general]
-shuffle_caption = true
 caption_extension = ".txt"
 
 [[datasets]]
@@ -282,3 +281,4 @@ def train(
     
     return TrainingOutput(weights=CogPath(final_lora))
 # Force rebuild Fri Dec 19 12:29:03 IST 2025
+# Cache buster: 1766305526
