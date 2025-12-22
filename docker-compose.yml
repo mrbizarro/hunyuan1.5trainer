@@ -1,0 +1,88 @@
+version: '3.8'
+
+services:
+  # Main training service
+  train:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      # Training data
+      - ./data:/src/input/zip:ro
+      # Model weights cache (persists between runs, ~50GB)
+      - ./models:/src/models
+      # Output LoRAs
+      - ./output:/src/output
+      # Script for live editing
+      - ./train_local.py:/src/train_local.py:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # Training command - edit as needed
+    command: >
+      python train_local.py
+      --input_zip /src/input/zip/cinematron.zip
+      --task t2v
+      --trigger_word "cinematron"
+      --epochs 5
+      --rank 32
+      --learning_rate 0.0001
+      --fp8
+
+  # Interactive shell for debugging
+  shell:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./data:/src/input/zip:ro
+      - ./models:/src/models
+      - ./output:/src/output
+      - ./train_local.py:/src/train_local.py
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    stdin_open: true
+    tty: true
+    command: /bin/bash
+
+  # Quick test - 1 epoch, no trigger word
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./data:/src/input/zip:ro
+      - ./models:/src/models
+      - ./output:/src/output
+      - ./train_local.py:/src/train_local.py:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: >
+      python train_local.py
+      --input_zip /src/input/zip/cinematron.zip
+      --task t2v
+      --epochs 1
+      --fp8

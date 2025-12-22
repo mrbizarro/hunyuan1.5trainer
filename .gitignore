@@ -13,3 +13,5 @@ weights/
 output/
 logs/
 .DS_Store
+data/
+models/

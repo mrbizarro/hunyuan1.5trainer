@@ -1,0 +1,46 @@
+# HunyuanVideo 1.5 LoRA Training - Local Docker
+# For testing on 3090 (24GB) before cloud deployment
+
+FROM nvidia/cuda:12.1-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# System deps
+RUN apt-get update && apt-get install -y \
+    python3.11 python3.11-venv python3-pip python3.11-dev \
+    git wget curl ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /usr/bin/python3.11 /usr/bin/python
+RUN ln -sf /usr/bin/python3.11 /usr/bin/python3
+
+WORKDIR /src
+
+# Clone musubi-tuner (main branch has HV 1.5 support)
+RUN git clone https://github.com/kohya-ss/musubi-tuner.git
+
+# Install PyTorch with CUDA 12.1
+RUN pip install --upgrade pip && \
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# Install musubi-tuner deps
+RUN pip install -r musubi-tuner/requirements.txt
+
+# Additional deps for training
+RUN pip install bitsandbytes accelerate safetensors transformers
+
+# Create directories
+RUN mkdir -p /src/models /src/input /src/output
+
+# Set env vars
+ENV MODEL_CACHE=/src/models
+ENV INPUT_DIR=/src/input
+ENV OUTPUT_DIR=/src/output
+ENV MUSUBI_DIR=/src/musubi-tuner
+
+# Copy training script
+COPY train_local.py /src/train_local.py
+
+# Default: show help
+CMD ["python", "train_local.py", "--help"]
